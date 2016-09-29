@@ -41,16 +41,24 @@ execute 'set-selinux-permissive' do
   only_if "[ ! -e /etc/httpd/conf/httpd.conf ] && [ -e /etc/redhat-release ] && [ $(/sbin/sestatus | grep -c '^Current mode:.*enforcing') -eq 1 ]"
 end
 
-http_bind = endpoint 'dashboard-http-bind'
-https_bind = endpoint 'dashboard-https-bind'
+http_bind = node['openstack']['bind_service']['dashboard_http']
+http_bind_address = bind_address http_bind
+https_bind = node['openstack']['bind_service']['dashboard_https']
+https_bind_address = bind_address https_bind
 
-# This allow the apache2/templates/default/ports.conf.erb to setup the correct listeners.
-listen_addresses = node['apache']['listen_addresses'] - ['*'] + [http_bind.host]
-listen_addresses += [https_bind.host] if node['openstack']['dashboard']['use_ssl']
-listen_ports = node['apache']['listen_ports'] - ['80'] + [http_bind.port]
-listen_ports += [https_bind.port] if node['openstack']['dashboard']['use_ssl']
-node.set['apache']['listen_addresses'] = listen_addresses.uniq
-node.set['apache']['listen_ports'] = listen_ports.uniq
+# This allows the apache2/templates/default/ports.conf.erb to setup the correct listeners.
+# Need to convert from Chef::Node::ImmutableArray in order to be able to modify
+apache2_listen = Array(node['apache']['listen'])
+# Remove the default apache2 cookbook port, as that is also the default for horizon, but with
+# a different address syntax.  *:80   vs  0.0.0.0:80
+apache2_listen -= ['*:80']
+
+apache2_listen += ["#{http_bind.host}:#{http_bind.port}"]
+if node['openstack']['dashboard']['use_ssl']
+  apache2_listen += ["#{https_bind.host}:#{https_bind.port}"]
+end
+
+node.normal['apache']['listen'] = apache2_listen.uniq
 
 include_recipe 'apache2'
 include_recipe 'apache2::mod_headers'
@@ -58,85 +66,67 @@ include_recipe 'apache2::mod_wsgi'
 include_recipe 'apache2::mod_rewrite'
 include_recipe 'apache2::mod_ssl' if node['openstack']['dashboard']['use_ssl']
 
-#
-# Workaround to re-enable selinux after installing apache on a fedora machine that has
-# selinux enabled and is currently permissive and the configuration set to enforcing.
-# TODO(breu): get the other one working and this won't be necessary
-#
-execute 'set-selinux-enforcing' do
-  command '/sbin/setenforce Enforcing ; restorecon -R /etc/httpd'
-  action :run
-
-  only_if "[ -e /etc/httpd/conf/httpd.conf ] && [ -e /etc/redhat-release ] && [ $(/sbin/sestatus | grep -c '^Current mode:.*permissive') -eq 1 ] && [ $(/sbin/sestatus | grep -c '^Mode from config file:.*enforcing') -eq 1 ]"
-end
-
 # delete the openstack-dashboard.conf before reload apache2 service on redhat and centos
 # since this file is not valid on those platforms for the apache2 service.
 file "#{node['apache']['dir']}/conf.d/openstack-dashboard.conf" do
   action :delete
   backup false
-
   only_if { platform_family?('rhel') } # :pragma-foodcritic: ~FC024 - won't fix this
 end
 
-if node['openstack']['dashboard']['use_ssl']
-  cert_file = "#{node['openstack']['dashboard']['ssl']['dir']}/certs/#{node['openstack']['dashboard']['ssl']['cert']}"
-  cert_mode = 00644
-  cert_owner = 'root'
-  cert_group = 'root'
-  if node['openstack']['dashboard']['ssl']['cert_url']
-    remote_file cert_file do
-      sensitive true
-      source node['openstack']['dashboard']['ssl']['cert_url']
+if node['openstack']['dashboard']['ssl']['use_data_bag']
+  ssl_cert = secret('certs', node['openstack']['dashboard']['ssl']['cert'])
+  ssl_key = secret('certs', node['openstack']['dashboard']['ssl']['key'])
+  if node['openstack']['dashboard']['ssl']['chain']
+    ssl_chain = secret('certs', node['openstack']['dashboard']['ssl']['chain'])
+  end
+end
+ssl_cert_file = File.join(node['openstack']['dashboard']['ssl']['cert_dir'], node['openstack']['dashboard']['ssl']['cert'])
+ssl_key_file = File.join(node['openstack']['dashboard']['ssl']['key_dir'], node['openstack']['dashboard']['ssl']['key'])
+ssl_chain_file = if node['openstack']['dashboard']['ssl']['chain']
+                   File.join(node['openstack']['dashboard']['ssl']['cert_dir'], node['openstack']['dashboard']['ssl']['chain'])
+                 end
+
+if node['openstack']['dashboard']['use_ssl'] &&
+   node['openstack']['dashboard']['ssl']['use_data_bag']
+  unless ssl_cert_file == ssl_key_file
+    cert_mode = 00644
+    cert_owner = 'root'
+    cert_group = 'root'
+
+    file ssl_cert_file do
+      content ssl_cert
       mode cert_mode
       owner cert_owner
       group cert_group
-
-      notifies :run, 'execute[restore-selinux-context]', :immediately
-    end
-  else
-    cookbook_file cert_file do
-      sensitive true
-      source 'horizon.pem'
-      mode cert_mode
-      owner cert_owner
-      group cert_group
-
       notifies :run, 'execute[restore-selinux-context]', :immediately
     end
   end
 
-  key_file = "#{node['openstack']['dashboard']['ssl']['dir']}/private/#{node['openstack']['dashboard']['ssl']['key']}"
+  if ssl_chain_file
+    cert_mode = 00644
+    cert_owner = 'root'
+    cert_group = 'root'
+
+    file ssl_chain_file do
+      content ssl_chain
+      mode cert_mode
+      owner cert_owner
+      group cert_group
+      notifies :run, 'execute[restore-selinux-context]', :immediately
+    end
+  end
+
   key_mode = 00640
   key_owner = 'root'
-  case node['platform_family']
-  when 'debian'
-    key_group = 'ssl-cert'
-  else
-    key_group = 'root'
-  end
+  key_group = node['openstack']['dashboard']['key_group']
 
-  if node['openstack']['dashboard']['ssl']['key_url']
-    remote_file key_file do
-      sensitive true
-      source node['openstack']['dashboard']['ssl']['key_url']
-      mode key_mode
-      owner key_owner
-      group key_group
-
-      notifies :restart, 'service[apache2]', :immediately
-      notifies :run, 'execute[restore-selinux-context]', :immediately
-    end
-  else
-    cookbook_file key_file do
-      sensitive true
-      source 'horizon.key'
-      mode key_mode
-      owner key_owner
-      group key_group
-
-      notifies :run, 'execute[restore-selinux-context]', :immediately
-    end
+  file ssl_key_file do
+    content ssl_key
+    mode key_mode
+    owner key_owner
+    group key_group
+    notifies :run, 'execute[restore-selinux-context]', :immediately
   end
 end
 
@@ -169,11 +159,12 @@ template node['openstack']['dashboard']['apache']['sites-path'] do
   mode 00644
 
   variables(
-    ssl_cert_file: "#{node['openstack']['dashboard']['ssl']['dir']}/certs/#{node['openstack']['dashboard']['ssl']['cert']}",
-    ssl_key_file: "#{node['openstack']['dashboard']['ssl']['dir']}/private/#{node['openstack']['dashboard']['ssl']['key']}",
-    http_bind_address: http_bind.host,
+    ssl_cert_file: ssl_cert_file.to_s,
+    ssl_key_file: ssl_key_file.to_s,
+    ssl_chain_file: ssl_chain_file.to_s,
+    http_bind_address: http_bind_address,
     http_bind_port: http_bind.port.to_i,
-    https_bind_address: https_bind.host,
+    https_bind_address: https_bind_address,
     https_bind_port: https_bind.port.to_i
   )
 
@@ -192,14 +183,12 @@ when 'debian'
 when 'rhel'
   apache_site 'default' do
     enable false
-
     notifies :run, 'execute[restore-selinux-context]', :immediately
   end
 end
 
 apache_site 'openstack-dashboard' do
   enable true
-
   notifies :run, 'execute[restore-selinux-context]', :immediately
   notifies :reload, 'service[apache2]', :immediately
 end
@@ -207,6 +196,5 @@ end
 execute 'restore-selinux-context' do
   command 'restorecon -Rv /etc/httpd /etc/pki; chcon -R -t httpd_sys_content_t /usr/share/openstack-dashboard || :'
   action :nothing
-
   only_if { platform_family?('fedora') }
 end

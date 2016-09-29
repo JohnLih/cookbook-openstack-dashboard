@@ -9,17 +9,12 @@ REDHAT_OPTS = {
   platform: 'redhat',
   version: '7.1',
   log_level: LOG_LEVEL
-}
+}.freeze
 UBUNTU_OPTS = {
   platform: 'ubuntu',
   version: '14.04',
   log_level: LOG_LEVEL
-}
-SUSE_OPTS = {
-  platform: 'suse',
-  version: '11.3',
-  log_level: LOG_LEVEL
-}
+}.freeze
 
 # Build a regex for a section of lines
 def build_section(lines)
@@ -34,6 +29,15 @@ shared_context 'dashboard_stubs' do
     allow_any_instance_of(Chef::Recipe).to receive(:get_password)
       .with('db', 'horizon')
       .and_return('test-passes')
+    allow_any_instance_of(Chef::Recipe).to receive(:secret)
+      .with('certs', 'horizon.pem')
+      .and_return('horizon_pem_value')
+    allow_any_instance_of(Chef::Recipe).to receive(:secret)
+      .with('certs', 'horizon-chain.pem')
+      .and_return('horizon_chain_pem_value')
+    allow_any_instance_of(Chef::Recipe).to receive(:secret)
+      .with('certs', 'horizon.key')
+      .and_return('horizon_key_value')
   end
 end
 

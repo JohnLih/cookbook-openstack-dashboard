@@ -8,6 +8,9 @@ NameVirtualHost <%= @http_bind_address %>:<%= @http_bind_port %>
 <% if node["openstack"]["dashboard"]["server_hostname"] -%>
   ServerName <%= node["openstack"]["dashboard"]["server_hostname"] %>
 <% end -%>
+<% unless node["openstack"]["dashboard"]["server_aliases"].empty? -%>
+  ServerAlias <%= node["openstack"]["dashboard"]["server_aliases"].join(" ") %>
+<% end -%>
 <% if node["openstack"]["dashboard"]["use_ssl"] %>
   RewriteEngine On
   RewriteCond %{HTTPS} off
@@ -26,6 +29,9 @@ NameVirtualHost <%= @https_bind_address %>:<%= @https_bind_port %>
 <VirtualHost <%= @https_bind_address %>:<%= @https_bind_port %>>
   <% if node["openstack"]["dashboard"]["server_hostname"] -%>
   ServerName <%= node["openstack"]["dashboard"]["server_hostname"] %>
+  <% end -%>
+  <% unless node["openstack"]["dashboard"]["server_aliases"].empty? -%>
+  ServerAlias <%= node["openstack"]["dashboard"]["server_aliases"].join(" ") %>
   <% end -%>
 <% end %>
   ServerAdmin <%= node["apache"]["contact"] %>
@@ -67,6 +73,9 @@ NameVirtualHost <%= @https_bind_address %>:<%= @https_bind_port %>
   SSLEngine on
   SSLCertificateFile <%= @ssl_cert_file %>
   SSLCertificateKeyFile <%= @ssl_key_file %>
+    <% if node['openstack']['dashboard']['ssl']['chain'] -%>
+  SSLCertificateChainFile <%= @ssl_chain_file %>
+    <% end -%>
   SSLProtocol <%= node["openstack"]["dashboard"]["ssl"]["protocol"] %>
     <% if node["openstack"]["dashboard"]["ssl"]["ciphers"] -%>
   SSLCipherSuite <%= node["openstack"]["dashboard"]["ssl"]["ciphers"] %>
